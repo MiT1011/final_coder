@@ -1,12 +1,13 @@
 """Interview Assistant v2 - Single Tkinter App."""
 import tkinter as tk
-from tkinter import scrolledtext, simpledialog
+from tkinter import scrolledtext, simpledialog, messagebox
 import threading, sys, ctypes
 from datetime import datetime
 from PIL import ImageGrab, ImageTk
 import keyboard
 import config as cfg
-from groq_service import GroqService, SessionManager, img_to_b64, get_api_key, save_api_key
+from llm_service import LLMService, SessionManager, img_to_b64, load_api_keys, save_api_keys, get_api_key
+from auth import LoginWindow
 
 def _win_hwnd(title):
     if sys.platform=="win32":
@@ -24,21 +25,6 @@ def set_click_through(hwnd,enable):
     s=ctypes.windll.user32.GetWindowLongW(hwnd,GWL)
     if enable: ctypes.windll.user32.SetWindowLongW(hwnd,GWL,s|LAY|TRN)
     else: ctypes.windll.user32.SetWindowLongW(hwnd,GWL,s&~TRN)
-
-def _ask_api_key():
-    """Show a dialog to collect Groq API key on first run."""
-    tmp = tk.Tk()
-    tmp.withdraw()
-    key = simpledialog.askstring(
-        "Interview Assistant — API Key",
-        "Enter your Groq API key:\n(Get one free at console.groq.com)",
-        parent=tmp
-    )
-    tmp.destroy()
-    if key and key.strip():
-        save_api_key(key.strip())
-        return key.strip()
-    return None
 
 class CopyableChat(scrolledtext.ScrolledText):
     def __init__(self,master,**kw):
@@ -65,32 +51,62 @@ class CopyableChat(scrolledtext.ScrolledText):
 class InterviewAssistant:
     WIN_TITLE="IA_Stealth_Overlay"
     def __init__(self):
-        # --- Get API key (prompt if missing) ---
-        api_key = get_api_key()
-        if not api_key:
-            api_key = _ask_api_key()
-            if not api_key:
-                sys.exit(0)  # User cancelled
+        # --- Collect API key BEFORE creating the overlay window ---
+        self._ensure_api_key()
+
         self.root=tk.Tk()
         self.root.title(self.WIN_TITLE)
+        self.root.withdraw()  # Stay hidden until fully built
         self.root.geometry(f"{cfg.WINDOW_WIDTH}x{cfg.WINDOW_HEIGHT}+{cfg.WINDOW_X}+{cfg.WINDOW_Y}")
         self.root.configure(bg=cfg.BG)
         self.root.attributes("-topmost",True)
         self.root.attributes("-alpha",cfg.DEFAULT_OPACITY)
         self.root.overrideredirect(True)
-        self.groq=GroqService(api_key=api_key)
+
+        self.active_model_var = tk.StringVar(value="Groq (Llama Scout)")
+        self._init_llm_service()
+
         self.session=SessionManager()
         self.current_page="chat"
         self.screenshots=[]; self.ss_photos=[]
         self._drag_x=0; self._drag_y=0
-        self.is_thinking=False; self.click_through=False
+        self.is_thinking=False; self.click_through=False; self._ct_paused=False
         self.settings_open=False; self._alpha=cfg.DEFAULT_OPACITY
         self._hidden=False; self._hwnd=0
+
         self._build_titlebar(); self._build_body()
         self.root.update_idletasks()
+        self.root.deiconify()  # NOW show the fully built window
         self.root.after(200,self._init_stealth)
         self._start_session(); self._register_hotkeys()
         self.show_chat_page(); self.root.mainloop()
+
+    def _ensure_api_key(self):
+        """Prompt for Groq API key using a standalone dialog BEFORE the overlay exists."""
+        key = get_api_key("groq")
+        if key:
+            return  # Already have it
+        tmp = tk.Tk()
+        tmp.withdraw()
+        key = simpledialog.askstring(
+            "API Key Required",
+            "Please enter your GROQ API key:\n(Get one free at console.groq.com)",
+            parent=tmp
+        )
+        tmp.destroy()
+        if key and key.strip():
+            saved_keys = load_api_keys()
+            saved_keys["groq"] = key.strip()
+            save_api_keys(saved_keys)
+        else:
+            sys.exit(0)  # User cancelled — can't continue without a key
+
+    def _init_llm_service(self):
+        try:
+            self.llm = LLMService(self.active_model_var.get())
+        except Exception as e:
+            self.llm = None
+            print("LLM Init Error:", e)
 
     def _init_stealth(self):
         self._hwnd=_win_hwnd(self.WIN_TITLE); apply_stealth(self._hwnd)
@@ -100,12 +116,26 @@ class InterviewAssistant:
         tb.pack(fill="x"); tb.pack_propagate(False)
         tb.bind("<ButtonPress-1>",self._drag_start)
         tb.bind("<B1-Motion>",self._drag_motion)
+        
         tk.Label(tb,text="⚡",bg="#010409",fg=cfg.ACCENT,font=("Segoe UI",12)).pack(side="left",padx=(8,2))
         tk.Label(tb,text="Interview Assistant",bg="#010409",fg=cfg.FG,font=("Segoe UI",9,"bold")).pack(side="left")
         self.status_lbl=tk.Label(tb,text="● connecting",bg="#010409",fg=cfg.YELLOW,font=cfg.FONT_TINY)
         self.status_lbl.pack(side="left",padx=6)
+        
         self._tb_btn(tb,"✕",self._quit,cfg.RED,side="right")
         self._tb_btn(tb,"⚙",self._toggle_settings,cfg.FG2,side="right")
+
+        # Model Selector
+        models = list(cfg.AVAILABLE_MODELS.keys())
+        self.model_menu = tk.OptionMenu(tb, self.active_model_var, *models, command=self._on_model_change)
+        self.model_menu.config(bg="#010409", fg=cfg.ACCENT, highlightthickness=0, font=("Segoe UI", 8), relief="flat")
+        self.model_menu["menu"].config(bg=cfg.BG2, fg=cfg.FG)
+        self.model_menu.pack(side="right", padx=10)
+
+    def _on_model_change(self, val):
+        self._init_llm_service()
+        if not self.llm:
+            messagebox.showwarning("API Key Missing", f"API Key for {val} is missing. Please add it in Settings.")
 
     def _tb_btn(self,p,text,cmd,color,side="right"):
         l=tk.Label(p,text=text,bg="#010409",fg=color,font=("Segoe UI",11,"bold"),cursor="",padx=6,pady=2)
@@ -136,20 +166,94 @@ class InterviewAssistant:
         pnl=tk.Frame(self.root,bg=cfg.BG2,highlightbackground=cfg.ACCENT,highlightthickness=1)
         pnl.place(relx=1.0,rely=0.0,anchor="ne",x=-2,y=36); self._settings_frame=pnl
         hdr=tk.Frame(pnl,bg=cfg.BG3); hdr.pack(fill="x")
-        tk.Label(hdr,text="⚙  Settings & Shortcuts",bg=cfg.BG3,fg=cfg.ACCENT,font=("Segoe UI",9,"bold"),padx=10,pady=6).pack(side="left")
+        tk.Label(hdr,text="⚙  Settings & API Keys",bg=cfg.BG3,fg=cfg.ACCENT,font=("Segoe UI",9,"bold"),padx=10,pady=6).pack(side="left")
         cx=tk.Label(hdr,text="✕",bg=cfg.BG3,fg=cfg.FG2,cursor="",font=("Segoe UI",11),padx=8)
         cx.pack(side="right"); cx.bind("<Button-1>",lambda e:self._toggle_settings())
         tk.Frame(pnl,bg=cfg.BG3,height=1).pack(fill="x")
-        orow=tk.Frame(pnl,bg=cfg.BG2); orow.pack(fill="x",padx=10,pady=8)
+
+        # API Keys Section
+        keys_frame = tk.Frame(pnl, bg=cfg.BG2)
+        keys_frame.pack(fill="x", padx=10, pady=8)
+
+        saved_keys = load_api_keys()
+
+        def _mask(key):
+            """Show stars + last 4 chars."""
+            if not key: return ""
+            if len(key) <= 4: return key
+            return "*" * (len(key) - 4) + key[-4:]
+
+        def _make_key_row(parent, row, label, provider):
+            real_key = saved_keys.get(provider, "")
+            tk.Label(parent, text=label, bg=cfg.BG2, fg=cfg.FG, font=cfg.FONT_SML).grid(row=row, column=0, sticky="w", pady=2)
+            entry = tk.Entry(parent, bg=cfg.BG3, fg=cfg.FG, width=25, insertbackground=cfg.ACCENT, show="")
+            entry.grid(row=row, column=1, padx=5, pady=2)
+            entry.insert(0, _mask(real_key))
+            entry.config(state="readonly")
+            # Store the real key for saving later
+            entry._real_key = real_key
+            entry._editing = False
+
+            def toggle_edit():
+                if entry._editing:
+                    # Save the new value and mask it
+                    new_key = entry.get().strip()
+                    entry._real_key = new_key
+                    entry.config(state="normal")
+                    entry.delete(0, tk.END)
+                    entry.insert(0, _mask(new_key))
+                    entry.config(state="readonly")
+                    btn.config(text="✏")
+                    entry._editing = False
+                else:
+                    # Show real key for editing
+                    entry.config(state="normal")
+                    entry.delete(0, tk.END)
+                    entry.insert(0, entry._real_key)
+                    btn.config(text="✔")
+                    entry._editing = True
+                    entry.focus_set()
+
+            btn = tk.Label(parent, text="✏", bg=cfg.BG3, fg=cfg.ACCENT, font=("Segoe UI", 10), cursor="", padx=4)
+            btn.grid(row=row, column=2, pady=2)
+            btn.bind("<Button-1>", lambda e: toggle_edit())
+            return entry
+
+        groq_entry = _make_key_row(keys_frame, 0, "Groq API Key:", "groq")
+        openai_entry = _make_key_row(keys_frame, 1, "OpenAI API Key:", "openai")
+        claude_entry = _make_key_row(keys_frame, 2, "Claude API Key:", "claude")
+
+        def save_keys():
+            # Read the real key from each entry (edited or original)
+            def _get_real(entry):
+                if entry._editing:
+                    return entry.get().strip()
+                return entry._real_key
+            keys = {
+                "groq": _get_real(groq_entry),
+                "openai": _get_real(openai_entry),
+                "claude": _get_real(claude_entry)
+            }
+            save_api_keys(keys)
+            self._init_llm_service()
+            self._toggle_settings()
+
+        tk.Button(keys_frame, text="Save Keys", command=save_keys, bg=cfg.ACCENT, fg=cfg.BG, font=cfg.FONT_SML, relief="flat").grid(row=3, column=0, columnspan=3, pady=5)
+
+        tk.Frame(pnl,bg=cfg.BG3,height=1).pack(fill="x",pady=(4,0))
+        
+        # Opacity slider
+        orow=tk.Frame(pnl,bg=cfg.BG2); orow.pack(fill="x",padx=10,pady=4)
         tk.Label(orow,text="Opacity:",bg=cfg.BG2,fg=cfg.FG2,font=cfg.FONT_SML,width=10,anchor="w").pack(side="left")
         vl=tk.Label(orow,text=f"{int(self._alpha*100)}%",bg=cfg.BG2,fg=cfg.FG,font=cfg.FONT_SML,width=4); vl.pack(side="right")
         def on_s(v):
             a=round(float(v),2); self._alpha=a; self.root.attributes("-alpha",a); vl.config(text=f"{int(a*100)}%")
         sl=tk.Scale(orow,from_=0.1,to=1.0,resolution=0.05,orient="horizontal",command=on_s,bg=cfg.BG2,fg=cfg.FG,troughcolor=cfg.BG3,highlightthickness=0,showvalue=False,sliderlength=14,length=150)
         sl.set(self._alpha); sl.pack(side="left",padx=4)
+
         tk.Frame(pnl,bg=cfg.BG3,height=1).pack(fill="x",pady=(4,0))
         tk.Label(pnl,text="Keyboard Shortcuts",bg=cfg.BG2,fg=cfg.ACCENT,font=("Segoe UI",8,"bold")).pack(anchor="w",padx=10,pady=(6,2))
-        for key,desc in [("Alt+Shift+S","Screenshot mode"),("Alt+G","Capture screenshot"),("Alt+B","Back to Chat"),("Alt+E","Submit / Send"),("Alt+T","Toggle click-through"),("Alt+H","Hide / Un-hide"),("Alt+Q","Quit"),("Alt+S","Settings"),("Alt+↑↓←→","Move window")]:
+        for key,desc in [("Alt+Shift+S","Screenshot mode"),("Alt+G","Capture screenshot"),("Alt+B","Back to Chat"),("Alt+E","Submit / Send"),("Alt+T","Toggle click-through"),("Alt+P","Focus prompt input"),("Alt+H","Hide / Un-hide"),("Alt+Q","Quit"),("Alt+S","Settings"),("Alt+↑↓←→","Move window")]:
             r=tk.Frame(pnl,bg=cfg.BG2); r.pack(fill="x",padx=10,pady=1)
             tk.Label(r,text=key,bg=cfg.BG3,fg=cfg.PURPLE,font=("Consolas",8),padx=4,pady=1).pack(side="left")
             tk.Label(r,text=f"  {desc}",bg=cfg.BG2,fg=cfg.FG2,font=cfg.FONT_TINY).pack(side="left")
@@ -267,9 +371,13 @@ class InterviewAssistant:
 
     def _send_chat(self):
         if not self.session.session_id or self.is_thinking: return
+        if not self.llm:
+            self._append(self.chat_display, "ai", "Error: LLM not initialized. Check API Key in Settings.", "Error")
+            return
         msg=self.chat_entry.get("1.0","end").strip()
         if not msg: return
         self.chat_entry.delete("1.0","end")
+        self._restore_click_through()
         self._append(self.chat_display,"user",msg,"You")
         threading.Thread(target=self._do_chat,args=(msg,),daemon=True).start()
 
@@ -277,7 +385,7 @@ class InterviewAssistant:
         self.is_thinking=True
         self.root.after(0,lambda:self._set_thinking(self.chat_display,True))
         try:
-            data=self.groq.chat(msg,self.session)
+            data=self.llm.chat(msg,self.session)
             ans=data["answer"]; qt=data["question_type"]; mem=data["memory_depth"]
             self.root.after(0,lambda:self._set_thinking(self.chat_display,False))
             self.root.after(0,lambda:self._append(self.chat_display,"ai",ans,f"AI [{qt}] mem:{mem}/5"))
@@ -311,7 +419,11 @@ class InterviewAssistant:
         if not self.screenshots:
             self._append(self.ss_display,"ai","⚠ No screenshots. Press Alt+G first.","System"); return
         if self.is_thinking: return
+        if not self.llm:
+            self._append(self.ss_display, "ai", "Error: LLM not initialized. Check API Key in Settings.", "Error")
+            return
         prompt=self.ss_prompt.get().strip() or None
+        self._restore_click_through()
         self._append(self.ss_display,"user",f"[{len(self.screenshots)} screenshot(s)]{(' — '+prompt) if prompt else ''}","You")
         threading.Thread(target=self._do_ss,args=(prompt,),daemon=True).start()
 
@@ -319,7 +431,7 @@ class InterviewAssistant:
         self.is_thinking=True
         self.root.after(0,lambda:self._set_thinking(self.ss_display,True))
         try:
-            data=self.groq.analyze_screenshots(self.screenshots,prompt,self.session)
+            data=self.llm.analyze_screenshots(self.screenshots,prompt,self.session)
             ans=data["answer"]; qt=data["question_type"]; mem=data["memory_depth"]; shots=data["screenshots_analyzed"]
             self.root.after(0,lambda:self._set_thinking(self.ss_display,False))
             self.root.after(0,lambda:self._append(self.ss_display,"ai",ans,f"AI [{qt}] │ {shots} shot(s) │ mem:{mem}/5"))
@@ -363,6 +475,29 @@ class InterviewAssistant:
         msg="Click-through ON" if self.click_through else "Click-through OFF"
         self._set_status(f"● {msg}",cfg.RED if self.click_through else cfg.GREEN)
 
+    def _focus_prompt(self):
+        """Focus the prompt input area so the user can start typing immediately."""
+        if self._hidden:
+            self.root.deiconify(); self._hidden=False
+        if self.click_through:
+            # Temporarily pause click-through at OS level so we can type
+            set_click_through(self._hwnd, False)
+            self._ct_paused=True
+        # Force the window to the foreground so it can receive keyboard input
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        if self.current_page=="chat":
+            self.chat_entry.focus_set()
+        else:
+            self.ss_prompt.focus_set()
+
+    def _restore_click_through(self):
+        """Re-enable click-through if it was paused by _focus_prompt."""
+        if self._ct_paused and self.click_through:
+            set_click_through(self._hwnd, True)
+        self._ct_paused=False
+
     def _toggle_hide(self):
         if self._hidden: self.root.deiconify(); self.root.after(100,self._init_stealth); self._hidden=False
         else: self.root.withdraw(); self._hidden=True
@@ -375,7 +510,7 @@ class InterviewAssistant:
         hk("alt+shift+s",lambda:self._switch_page("screenshot"))
         hk("alt+b",lambda:self._switch_page("chat"))
         hk("alt+g",self._hk_capture); hk("alt+e",self._hk_submit)
-        hk("alt+t",self._toggle_click_through); hk("alt+h",self._toggle_hide)
+        hk("alt+t",self._toggle_click_through); hk("alt+p",self._focus_prompt); hk("alt+h",self._toggle_hide)
         hk("alt+q",self._quit); hk("alt+s",self._toggle_settings)
         hk("alt+up",lambda:self._move_window(0,-cfg.MOVE_STEP))
         hk("alt+down",lambda:self._move_window(0,cfg.MOVE_STEP))
@@ -397,4 +532,6 @@ class InterviewAssistant:
         keyboard.unhook_all(); self.root.destroy()
 
 if __name__=="__main__":
-    InterviewAssistant()
+    login = LoginWindow()
+    if login.run():
+        InterviewAssistant()

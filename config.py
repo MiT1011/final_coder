@@ -1,7 +1,22 @@
 """All configurable settings."""
 
-TEXT_MODEL   = "meta-llama/llama-4-scout-17b-16e-instruct"
-VISION_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
+AVAILABLE_MODELS = {
+    "Groq (Llama Scout)": {
+        "provider": "groq",
+        "text": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "vision": "meta-llama/llama-4-scout-17b-16e-instruct"
+    },
+    "OpenAI (GPT-4o)": {
+        "provider": "openai",
+        "text": "gpt-4o",
+        "vision": "gpt-4o"
+    },
+    "Claude (3.5 Sonnet)": {
+        "provider": "claude",
+        "text": "claude-3-5-sonnet-20240620",
+        "vision": "claude-3-5-sonnet-20240620"
+    }
+}
 MAX_TOKENS   = 1500
 TEMPERATURE  = 0.3
 CHAT_MEMORY_LIMIT = 5
