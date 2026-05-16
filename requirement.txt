@@ -1,6 +1,7 @@
 groq
 python-dotenv
 pillow
-keyboard
 google-auth-oauthlib
 google-api-python-client
+soundcard
+numpy

@@ -1,9 +1,11 @@
 """LLM API service + Session manager with modular providers."""
-import os, sys, uuid, io, base64
+import os, sys, uuid, io, base64, logging
 from groq import Groq
 from dotenv import load_dotenv
 import config as cfg
 import json
+
+log = logging.getLogger(__name__)
 
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
@@ -47,6 +49,28 @@ def img_to_b64(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
+
+def transcribe_audio(wav_bytes):
+    """Transcribe a WAV blob using Groq Whisper. STT always uses Groq regardless of the active LLM provider."""
+    key = get_api_key("groq")
+    if not key:
+        raise ValueError("Groq API key required for audio transcription.")
+    client = Groq(api_key=key)
+    log.info("Whisper request: %d bytes, model=%s", len(wav_bytes), cfg.WHISPER_MODEL)
+    try:
+        response = client.audio.transcriptions.create(
+            file=("audio.wav", wav_bytes, "audio/wav"),
+            model=cfg.WHISPER_MODEL,
+        )
+    except Exception:
+        log.exception("Whisper API call failed")
+        raise
+    text = getattr(response, "text", None)
+    if text is None:
+        text = str(response) if response else ""
+    text = text.strip()
+    log.info("Whisper response: %d chars", len(text))
+    return text
 
 class SessionManager:
     def __init__(self):
