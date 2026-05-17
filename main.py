@@ -188,17 +188,77 @@ class InterviewAssistant:
         self._tb_btn(tb,"✕",self._quit,cfg.RED,side="right")
         self._tb_btn(tb,"⚙",self._toggle_settings,cfg.FG2,side="right")
 
-        # Model Selector
-        models = list(cfg.AVAILABLE_MODELS.keys())
-        self.model_menu = tk.OptionMenu(tb, self.active_model_var, *models, command=self._on_model_change)
-        self.model_menu.config(bg="#010409", fg=cfg.ACCENT, highlightthickness=0, font=("Segoe UI", 8), relief="flat")
-        self.model_menu["menu"].config(bg=cfg.BG2, fg=cfg.FG)
-        self.model_menu.pack(side="right", padx=10)
+        # Model Selector — custom stealth popup so the native OS dropdown
+        # never appears (tk.OptionMenu's menu is a separate unprotected window
+        # that shows up in screen-share capture).
+        self._model_popup = None
+        self.model_btn = tk.Label(tb, textvariable=self.active_model_var,
+                                  bg="#010409", fg=cfg.ACCENT,
+                                  font=("Segoe UI", 8), cursor="", padx=6)
+        self.model_btn.pack(side="right", padx=4)
+        self.model_btn.bind("<Button-1>", lambda e: self._toggle_model_popup())
 
     def _on_model_change(self, val):
+        self.active_model_var.set(val)
         self._init_llm_service()
         if not self.llm:
             messagebox.showwarning("API Key Missing", f"API Key for {val} is missing. Please add it in Settings.")
+
+    def _toggle_model_popup(self):
+        if self._model_popup is not None:
+            self._close_model_popup()
+            return
+        self._open_model_popup()
+
+    def _open_model_popup(self):
+        # Use a Frame placed INSIDE self.root — it inherits the main window's
+        # WDA_EXCLUDEFROMCAPTURE affinity, so it's invisible to screen-share.
+        # A Toplevel is a separate OS window and won't be covered by stealth.
+        pnl = tk.Frame(self.root, bg=cfg.BG2,
+                       highlightbackground=cfg.ACCENT, highlightthickness=1)
+        self._model_popup = pnl
+
+        models = list(cfg.AVAILABLE_MODELS.keys())
+        for m in models:
+            is_active = m == self.active_model_var.get()
+            lbl = tk.Label(pnl, text=m,
+                           bg=cfg.BG3 if is_active else cfg.BG2,
+                           fg=cfg.ACCENT if is_active else cfg.FG,
+                           font=("Segoe UI", 9), padx=12, pady=6,
+                           anchor="w", cursor="")
+            lbl.pack(fill="x")
+            lbl.bind("<Enter>", lambda e, l=lbl: l.config(bg=cfg.BG3))
+            lbl.bind("<Leave>", lambda e, l=lbl, active=is_active:
+                     l.config(bg=cfg.BG3 if active else cfg.BG2))
+            lbl.bind("<Button-1>", lambda e, v=m: self._select_model(v))
+
+        # Place it anchored to the top-right, below the titlebar — same as settings panel
+        pnl.place(relx=1.0, rely=0.0, anchor="ne", x=-2, y=36)
+        # Dismiss when clicking anywhere else on the main window
+        self.root.bind("<Button-1>", self._on_root_click_dismiss, add="+")
+
+    def _on_root_click_dismiss(self, e):
+        if self._model_popup is None:
+            return
+        # Check if the click was inside the popup frame
+        px = self._model_popup.winfo_rootx()
+        py = self._model_popup.winfo_rooty()
+        pw = self._model_popup.winfo_width()
+        ph = self._model_popup.winfo_height()
+        ex, ey = e.x_root, e.y_root
+        if not (px <= ex <= px + pw and py <= ey <= py + ph):
+            self._close_model_popup()
+
+    def _select_model(self, val):
+        self._close_model_popup()
+        self._on_model_change(val)
+
+    def _close_model_popup(self):
+        if self._model_popup is not None:
+            self._model_popup.place_forget()
+            self._model_popup.destroy()
+            self._model_popup = None
+        self.root.unbind("<Button-1>")
 
     def _tb_btn(self,p,text,cmd,color,side="right"):
         l=tk.Label(p,text=text,bg="#010409",fg=color,font=("Segoe UI",11,"bold"),cursor="",padx=6,pady=2)
