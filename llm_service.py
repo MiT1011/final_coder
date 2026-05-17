@@ -1,57 +1,112 @@
-"""LLM API service + Session manager with modular providers."""
+"""LLM API service + Session manager with modular providers.
+
+Providers:
+- Groq (Llama Scout) — text + vision, always available, also powers Whisper STT.
+- OpenAI (GPT-5 / GPT-5 mini) — text + vision via the chat.completions API.
+- Anthropic (Claude Sonnet 4.6 / Opus 4.7) — text + vision via Messages API.
+
+API keys are persisted with DPAPI encryption (see `secure_store`). The file
+on disk in %APPDATA%\\InterviewAssistant\\api_keys.dat is opaque bytes; only
+the same Windows user can decrypt it.
+"""
 import os, sys, uuid, io, base64, logging
-from groq import Groq
-from dotenv import load_dotenv
 import config as cfg
-import json
+from secure_store import load_secret_json, save_secret_json
 
 log = logging.getLogger(__name__)
 
-if getattr(sys, 'frozen', False):
-    _base = sys._MEIPASS
-else:
-    _base = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_base, '.env'))
+# Vendor SDKs (groq, openai, anthropic) are imported lazily inside the
+# corresponding provider's __init__, NOT at module top. Reason: pydantic v2
+# in those SDKs is heavy on import (200–600ms each), and we don't want to
+# pay that cost unless the user actually selects that provider. Importing
+# `llm_service` itself stays cheap so the splash bar can advance smoothly.
+
+try:
+    from dotenv import load_dotenv
+    if getattr(sys, 'frozen', False):
+        _base = sys._MEIPASS
+    else:
+        _base = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(_base, '.env'))
+except Exception:
+    pass
 
 _APP_DIR = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "InterviewAssistant")
-_KEYS_FILE = os.path.join(_APP_DIR, "api_keys.json")
+# Note: .dat extension — file is encrypted, not JSON. Old api_keys.json (if
+# present from a prior install) is auto-migrated on first read.
+_KEYS_FILE = os.path.join(_APP_DIR, "api_keys.dat")
+_LEGACY_KEYS_FILE = os.path.join(_APP_DIR, "api_keys.json")
+
+
+def _migrate_legacy_keys():
+    """If a legacy plaintext api_keys.json exists, re-encrypt and delete it."""
+    if not os.path.isfile(_LEGACY_KEYS_FILE):
+        return
+    try:
+        import json
+        with open(_LEGACY_KEYS_FILE, "r") as f:
+            keys = json.load(f)
+        save_secret_json(_KEYS_FILE, keys)
+        os.remove(_LEGACY_KEYS_FILE)
+        log.info("Migrated legacy api_keys.json -> api_keys.dat (DPAPI)")
+    except Exception:
+        log.exception("Legacy key migration failed")
+
 
 def load_api_keys():
-    """Load API keys from local storage."""
-    if os.path.isfile(_KEYS_FILE):
-        with open(_KEYS_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except:
-                pass
-    return {}
+    """Decrypt and return the API keys dict. Returns {} on any failure."""
+    _migrate_legacy_keys()
+    return load_secret_json(_KEYS_FILE)
+
 
 def save_api_keys(keys_dict):
-    """Save API keys to local storage."""
+    """Encrypt and persist the API keys dict."""
     os.makedirs(_APP_DIR, exist_ok=True)
-    with open(_KEYS_FILE, "w") as f:
-        json.dump(keys_dict, f)
+    save_secret_json(_KEYS_FILE, keys_dict)
+
 
 def get_api_key(provider="groq"):
     keys = load_api_keys()
-    if provider in keys and keys[provider]:
-        return keys[provider]
-    return ""
+    v = keys.get(provider) or ""
+    return v.strip() if isinstance(v, str) else ""
+
+
+def available_providers():
+    """Return the set of provider names with a non-empty key configured."""
+    keys = load_api_keys()
+    return {p for p, v in keys.items() if isinstance(v, str) and v.strip()}
+
+
+def available_models():
+    """Filter cfg.AVAILABLE_MODELS to entries whose required key is present."""
+    have = available_providers()
+    return {name: info for name, info in cfg.AVAILABLE_MODELS.items()
+            if info.get("requires") in have}
+
 
 def detect_question_type(text):
-    t = text.lower()
-    if any(k in t for k in ["write","implement","code","function","algorithm","debug","fix"]): return "code"
-    if any(k in t for k in ["tell me about","describe a time","how did you","strength","weakness"]): return "behavioral"
-    if any(k in t for k in ["design","architecture","scale","system","database","microservice"]): return "system_design"
+    t = (text or "").lower()
+    if any(k in t for k in ["write", "implement", "code", "function", "algorithm", "debug", "fix"]):
+        return "code"
+    if any(k in t for k in ["tell me about", "describe a time", "how did you", "strength", "weakness"]):
+        return "behavioral"
+    if any(k in t for k in ["design", "architecture", "scale", "system", "database", "microservice"]):
+        return "system_design"
     return "general"
+
 
 def img_to_b64(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+
 def transcribe_audio(wav_bytes):
     """Transcribe a WAV blob using Groq Whisper. STT always uses Groq regardless of the active LLM provider."""
+    try:
+        from groq import Groq
+    except Exception as e:
+        raise RuntimeError(f"groq SDK not installed: {e}")
     key = get_api_key("groq")
     if not key:
         raise ValueError("Groq API key required for audio transcription.")
@@ -72,6 +127,10 @@ def transcribe_audio(wav_bytes):
     log.info("Whisper response: %d chars", len(text))
     return text
 
+
+# ---------------------------------------------------------------------------
+# Session manager — shared across all providers.
+# ---------------------------------------------------------------------------
 class SessionManager:
     def __init__(self):
         self.session_id = None
@@ -92,6 +151,8 @@ class SessionManager:
         self.message_count = 0
 
     def push_memory(self, role, content):
+        # `content` is always plain text in memory — images are dropped after
+        # the turn that sent them, leaving only a textual breadcrumb.
         self.memory.append({"role": role, "content": content})
 
     def get_recent_memory(self):
@@ -102,109 +163,257 @@ class SessionManager:
         return cfg.SYSTEM_PROMPT_TEMPLATE.format(
             name=self.candidate_name, role=self.job_role, stack=stack)
 
+
+# ---------------------------------------------------------------------------
+# Provider base class
+# ---------------------------------------------------------------------------
 class LLMProvider:
     def __init__(self, text_model, vision_model):
         self.text_model = text_model
         self.vision_model = vision_model
-    
+
     def chat(self, message, session):
         raise NotImplementedError
-    
+
     def analyze_screenshots(self, images_b64, prompt, session):
         raise NotImplementedError
 
+
+def _memory_breadcrumb(images_b64, prompt_text):
+    n = len(images_b64)
+    return f"[{n} screenshot{'s' if n != 1 else ''}] {prompt_text}"
+
+
+# ---------------------------------------------------------------------------
+# Groq
+# ---------------------------------------------------------------------------
 class GroqProvider(LLMProvider):
     def __init__(self, text_model, vision_model):
         super().__init__(text_model, vision_model)
+        try:
+            from groq import Groq
+        except Exception as e:
+            raise RuntimeError(f"groq SDK not installed: {e}")
         key = get_api_key("groq")
         if not key:
             raise ValueError("Groq API Key is not set.")
         self.client = Groq(api_key=key)
 
     def chat(self, message, session):
-        messages = [{"role":"system","content":session.build_system_prompt()}]
+        messages = [{"role": "system", "content": session.build_system_prompt()}]
         messages += session.get_recent_memory()
-        messages.append({"role":"user","content":message})
-        
+        messages.append({"role": "user", "content": message})
         response = self.client.chat.completions.create(
             model=self.text_model, messages=messages,
             max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
         answer = response.choices[0].message.content
-        
         session.push_memory("user", message)
         session.push_memory("assistant", answer)
         session.message_count += 1
-        return {"answer":answer,"question_type":detect_question_type(message),
-                "memory_depth":len(session.get_recent_memory())//2}
+        return {"answer": answer,
+                "question_type": detect_question_type(message),
+                "memory_depth": len(session.get_recent_memory()) // 2}
 
     def analyze_screenshots(self, images_b64, prompt, session):
+        prompt_text = prompt or "Analyze these screenshots. Identify questions/problems and give concise answers."
         content = []
         for b64 in images_b64:
-            content.append({"type":"image_url","image_url":{"url":f"data:image/png;base64,{b64}"}})
-        prompt_text = prompt or "Analyze these interview screenshots. Identify all questions/problems and give concise answers."
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        # Inline prior conversation as text — Groq images-in-history is flaky.
         recent = session.get_recent_memory()
         ctx = ""
         if recent:
             pairs = []
-            for i in range(0, len(recent)-1, 2):
-                u = recent[i].get("content","")
-                a = recent[i+1].get("content","") if i+1<len(recent) else ""
-                if isinstance(u,list): u = next((x["text"] for x in u if x["type"]=="text"),"")
-                if isinstance(a,list): a = next((x["text"] for x in a if x["type"]=="text"),"")
+            for i in range(0, len(recent) - 1, 2):
+                u = recent[i].get("content", "")
+                a = recent[i + 1].get("content", "") if i + 1 < len(recent) else ""
                 pairs.append(f"User: {u}\nAssistant: {a}")
-            if pairs: ctx = "Previous conversation context:\n"+"\n---\n".join(pairs)+"\n\n"
-        content.append({"type":"text","text":ctx+prompt_text})
-        
-        messages = [{"role":"system","content":session.build_system_prompt()},
-                     {"role":"user","content":content}]
-        
+            if pairs:
+                ctx = "Previous conversation context:\n" + "\n---\n".join(pairs) + "\n\n"
+        content.append({"type": "text", "text": ctx + prompt_text})
+
+        messages = [{"role": "system", "content": session.build_system_prompt()},
+                    {"role": "user", "content": content}]
         response = self.client.chat.completions.create(
             model=self.vision_model, messages=messages,
             max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
         answer = response.choices[0].message.content
-        
-        session.push_memory("user", f"[{len(images_b64)} screenshot(s)] {prompt_text}")
+        session.push_memory("user", _memory_breadcrumb(images_b64, prompt_text))
         session.push_memory("assistant", answer)
         session.message_count += 1
-        return {"answer":answer,"question_type":detect_question_type(answer),
-                "screenshots_analyzed":len(images_b64),
-                "memory_depth":len(session.get_recent_memory())//2}
+        return {"answer": answer,
+                "question_type": detect_question_type(answer),
+                "screenshots_analyzed": len(images_b64),
+                "memory_depth": len(session.get_recent_memory()) // 2}
 
+
+# ---------------------------------------------------------------------------
+# OpenAI (GPT-5 family)
+# ---------------------------------------------------------------------------
 class OpenAIProvider(LLMProvider):
-    # Skeleton to be implemented later
-    def chat(self, message, session):
-        return {"answer": "OpenAI not implemented yet.", "question_type": "general", "memory_depth": 0}
-    def analyze_screenshots(self, images_b64, prompt, session):
-        return {"answer": "OpenAI not implemented yet.", "question_type": "general", "memory_depth": 0, "screenshots_analyzed": 0}
+    def __init__(self, text_model, vision_model):
+        super().__init__(text_model, vision_model)
+        try:
+            from openai import OpenAI
+        except Exception as e:
+            raise RuntimeError(f"openai SDK not installed (pip install openai): {e}")
+        key = get_api_key("openai")
+        if not key:
+            raise ValueError("OpenAI API Key is not set.")
+        self.client = OpenAI(api_key=key)
 
-class ClaudeProvider(LLMProvider):
-    # Skeleton to be implemented later
     def chat(self, message, session):
-        return {"answer": "Claude not implemented yet.", "question_type": "general", "memory_depth": 0}
+        messages = [{"role": "system", "content": session.build_system_prompt()}]
+        messages += session.get_recent_memory()
+        messages.append({"role": "user", "content": message})
+        response = self.client.chat.completions.create(
+            model=self.text_model, messages=messages,
+            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
+        answer = response.choices[0].message.content
+        session.push_memory("user", message)
+        session.push_memory("assistant", answer)
+        session.message_count += 1
+        return {"answer": answer,
+                "question_type": detect_question_type(message),
+                "memory_depth": len(session.get_recent_memory()) // 2}
+
     def analyze_screenshots(self, images_b64, prompt, session):
-        return {"answer": "Claude not implemented yet.", "question_type": "general", "memory_depth": 0, "screenshots_analyzed": 0}
+        prompt_text = prompt or "Analyze these screenshots. Identify questions/problems and give concise answers."
+        content = [{"type": "text", "text": prompt_text}]
+        for b64 in images_b64:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"}
+            })
+        messages = [{"role": "system", "content": session.build_system_prompt()}]
+        messages += session.get_recent_memory()
+        messages.append({"role": "user", "content": content})
+
+        response = self.client.chat.completions.create(
+            model=self.vision_model, messages=messages,
+            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
+        answer = response.choices[0].message.content
+        session.push_memory("user", _memory_breadcrumb(images_b64, prompt_text))
+        session.push_memory("assistant", answer)
+        session.message_count += 1
+        return {"answer": answer,
+                "question_type": detect_question_type(answer),
+                "screenshots_analyzed": len(images_b64),
+                "memory_depth": len(session.get_recent_memory()) // 2}
+
+
+# ---------------------------------------------------------------------------
+# Anthropic (Claude Sonnet 4.6 / Opus 4.7)
+# ---------------------------------------------------------------------------
+class ClaudeProvider(LLMProvider):
+    def __init__(self, text_model, vision_model):
+        super().__init__(text_model, vision_model)
+        try:
+            import anthropic
+        except Exception as e:
+            raise RuntimeError(f"anthropic SDK not installed (pip install anthropic): {e}")
+        key = get_api_key("claude")
+        if not key:
+            raise ValueError("Claude API Key is not set.")
+        self.client = anthropic.Anthropic(api_key=key)
+
+    @staticmethod
+    def _memory_to_anthropic(recent):
+        """Re-shape the shared session.memory into Anthropic's messages array.
+
+        Anthropic forbids a leading system role and uses `messages=[{role, content}]`
+        with `system=...` passed separately. Roles alternate user/assistant.
+        """
+        out = []
+        for m in recent:
+            role = m.get("role")
+            content = m.get("content", "")
+            if role not in ("user", "assistant"):
+                continue
+            out.append({"role": role, "content": content})
+        return out
+
+    def chat(self, message, session):
+        messages = self._memory_to_anthropic(session.get_recent_memory())
+        messages.append({"role": "user", "content": message})
+        response = self.client.messages.create(
+            model=self.text_model,
+            system=session.build_system_prompt(),
+            messages=messages,
+            max_tokens=cfg.MAX_TOKENS,
+            temperature=cfg.TEMPERATURE,
+        )
+        answer = "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
+        )
+        session.push_memory("user", message)
+        session.push_memory("assistant", answer)
+        session.message_count += 1
+        return {"answer": answer,
+                "question_type": detect_question_type(message),
+                "memory_depth": len(session.get_recent_memory()) // 2}
+
+    def analyze_screenshots(self, images_b64, prompt, session):
+        prompt_text = prompt or "Analyze these screenshots. Identify questions/problems and give concise answers."
+        user_content = []
+        for b64 in images_b64:
+            user_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": b64,
+                },
+            })
+        user_content.append({"type": "text", "text": prompt_text})
+
+        messages = self._memory_to_anthropic(session.get_recent_memory())
+        messages.append({"role": "user", "content": user_content})
+
+        response = self.client.messages.create(
+            model=self.vision_model,
+            system=session.build_system_prompt(),
+            messages=messages,
+            max_tokens=cfg.MAX_TOKENS,
+            temperature=cfg.TEMPERATURE,
+        )
+        answer = "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
+        )
+        session.push_memory("user", _memory_breadcrumb(images_b64, prompt_text))
+        session.push_memory("assistant", answer)
+        session.message_count += 1
+        return {"answer": answer,
+                "question_type": detect_question_type(answer),
+                "screenshots_analyzed": len(images_b64),
+                "memory_depth": len(session.get_recent_memory()) // 2}
+
+
+# ---------------------------------------------------------------------------
+# Service facade
+# ---------------------------------------------------------------------------
+_PROVIDER_REGISTRY = {
+    "groq": GroqProvider,
+    "openai": OpenAIProvider,
+    "claude": ClaudeProvider,
+}
+
 
 class LLMService:
     def __init__(self, model_key):
+        self.model_key = None
         self.set_model(model_key)
-        
+
     def set_model(self, model_key):
         model_info = cfg.AVAILABLE_MODELS.get(model_key)
         if not model_info:
             raise ValueError(f"Model {model_key} not found in configuration.")
-            
-        provider_name = model_info["provider"]
-        t_model = model_info["text"]
-        v_model = model_info["vision"]
-        
-        if provider_name == "groq":
-            self.provider = GroqProvider(t_model, v_model)
-        elif provider_name == "openai":
-            self.provider = OpenAIProvider(t_model, v_model)
-        elif provider_name == "claude":
-            self.provider = ClaudeProvider(t_model, v_model)
-        else:
-            raise ValueError(f"Unknown provider: {provider_name}")
+        provider_cls = _PROVIDER_REGISTRY.get(model_info["provider"])
+        if provider_cls is None:
+            raise ValueError(f"Unknown provider: {model_info['provider']}")
+        self.provider = provider_cls(model_info["text"], model_info["vision"])
+        self.model_key = model_key
 
     def chat(self, message, session):
         return self.provider.chat(message, session)

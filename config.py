@@ -1,22 +1,40 @@
 """All configurable settings."""
 
 AVAILABLE_MODELS = {
-    "Groq (Llama Scout)": {
+    # Groq is the always-available default — bundled free tier (Llama Scout +
+    # Whisper). Its key is collected as mandatory after login.
+    "Groq Llama Scout": {
         "provider": "groq",
         "text": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "vision": "meta-llama/llama-4-scout-17b-16e-instruct"
+        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "requires": "groq",
     },
-    "OpenAI (GPT-4o)": {
+    "GPT-5": {
         "provider": "openai",
-        "text": "gpt-4o",
-        "vision": "gpt-4o"
+        "text": "gpt-5",
+        "vision": "gpt-5",
+        "requires": "openai",
     },
-    "Claude (3.5 Sonnet)": {
+    "GPT-5 mini": {
+        "provider": "openai",
+        "text": "gpt-5-mini",
+        "vision": "gpt-5-mini",
+        "requires": "openai",
+    },
+    "Claude Sonnet 4.6": {
         "provider": "claude",
-        "text": "claude-3-5-sonnet-20240620",
-        "vision": "claude-3-5-sonnet-20240620"
-    }
+        "text": "claude-sonnet-4-6",
+        "vision": "claude-sonnet-4-6",
+        "requires": "claude",
+    },
+    "Claude Opus 4.7": {
+        "provider": "claude",
+        "text": "claude-opus-4-7",
+        "vision": "claude-opus-4-7",
+        "requires": "claude",
+    },
 }
+DEFAULT_MODEL = "Groq Llama Scout"
 MAX_TOKENS   = 1500
 TEMPERATURE  = 0.3
 CHAT_MEMORY_LIMIT = 5

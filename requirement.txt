@@ -1,4 +1,6 @@
 groq
+openai
+anthropic
 python-dotenv
 pillow
 google-auth-oauthlib
