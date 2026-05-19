@@ -65,6 +65,17 @@ def save_api_keys(keys_dict):
     save_secret_json(_KEYS_FILE, keys_dict)
 
 
+def wipe_api_keys():
+    """Delete the stored API keys file (and any legacy plaintext version)."""
+    for path in (_KEYS_FILE, _LEGACY_KEYS_FILE):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                log.info("Removed %s", path)
+        except Exception:
+            log.exception("Failed to remove %s", path)
+
+
 def get_api_key(provider="groq"):
     keys = load_api_keys()
     v = keys.get(provider) or ""

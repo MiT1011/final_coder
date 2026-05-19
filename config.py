@@ -9,6 +9,20 @@ AVAILABLE_MODELS = {
         "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
         "requires": "groq",
     },
+    "Groq GPT-OSS 120B": {
+        "provider": "groq",
+        "text": "openai/gpt-oss-120b",
+        # Text-only on Groq — fall back to Scout for screenshot/vision calls.
+        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "requires": "groq",
+    },
+    "Groq Llama 3.3 70B": {
+        "provider": "groq",
+        "text": "llama-3.3-70b-versatile",
+        # Text-only on Groq — fall back to Scout for screenshot/vision calls.
+        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "requires": "groq",
+    },
     "GPT-5": {
         "provider": "openai",
         "text": "gpt-5",
@@ -37,7 +51,7 @@ AVAILABLE_MODELS = {
 DEFAULT_MODEL = "Groq Llama Scout"
 MAX_TOKENS   = 1500
 TEMPERATURE  = 0.3
-CHAT_MEMORY_LIMIT = 5
+CHAT_MEMORY_LIMIT = 15
 
 DEFAULT_JOB_ROLE       = "Software Engineer"
 DEFAULT_CANDIDATE_NAME = "Candidate"

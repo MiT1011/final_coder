@@ -89,6 +89,24 @@ def _save_creds(creds):
     save_secret_json(TOKEN_FILE, json.loads(creds.to_json()))
 
 
+def logout():
+    """Delete the stored Google token so next launch forces re-login.
+
+    Returns True if a token file existed and was removed (or already gone).
+    """
+    try:
+        if os.path.isfile(TOKEN_FILE):
+            os.remove(TOKEN_FILE)
+            log.info("Logout: removed %s", TOKEN_FILE)
+        if os.path.isfile(_LEGACY_TOKEN_FILE):
+            os.remove(_LEGACY_TOKEN_FILE)
+            log.info("Logout: removed legacy %s", _LEGACY_TOKEN_FILE)
+        return True
+    except Exception:
+        log.exception("Logout: failed to remove token file")
+        return False
+
+
 class LoginWindow:
     def __init__(self):
         self.root = tk.Tk()

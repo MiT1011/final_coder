@@ -25,12 +25,13 @@ from PIL import ImageGrab, ImageTk
 
 from win_hotkeys import HotkeyManager
 import config as cfg
+import auth
 from logger_setup import setup_logging
 log = setup_logging()
 from llm_service import (
     LLMService, SessionManager,
     img_to_b64, load_api_keys, save_api_keys, get_api_key, transcribe_audio,
-    available_models,
+    available_models, wipe_api_keys,
 )
 try:
     from audio_service import AudioListener, AudioCaptureError, ManualRecorder, chunk_wav_for_whisper
@@ -345,6 +346,35 @@ class InterviewAssistant:
         else:
             self._build_settings_panel(); self.settings_open = True
 
+    def _logout(self):
+        """Confirm, wipe the Google token, and quit so next launch re-prompts login."""
+        # Temporarily disable click-through so the confirm dialog is interactive.
+        was_ct = self.click_through
+        if was_ct:
+            set_click_through(self._hwnd, False)
+        try:
+            confirm = messagebox.askyesno(
+                "Logout",
+                "Sign out and reset Interview Assistant?\n\n"
+                "Your saved Google login AND all API keys will be removed.\n"
+                "The app will quit and start fresh on next launch.",
+                parent=self.root,
+            )
+        finally:
+            if was_ct:
+                set_click_through(self._hwnd, True)
+        if not confirm:
+            return
+        ok = auth.logout()
+        try:
+            wipe_api_keys()
+            keys_ok = True
+        except Exception:
+            log.exception("wipe_api_keys() raised")
+            keys_ok = False
+        log.info("User-initiated logout (token removed=%s, keys removed=%s)", ok, keys_ok)
+        self._quit()
+
     def _build_settings_panel(self):
         pnl = tk.Frame(self.root, bg=cfg.BG2,
                        highlightbackground=cfg.ACCENT, highlightthickness=1)
@@ -463,18 +493,28 @@ class InterviewAssistant:
             ("Alt+Shift+D", "Manual record (toggle)"),
             ("Alt+T", "Toggle click-through"),
             ("Alt+P", "Focus prompt input"),
-            ("Alt+L", "Clear chat"),
+            ("Alt+C", "Clear chat"),
             ("Alt+H", "Hide / Un-hide"),
             ("Alt+Q", "Quit"),
             ("Alt+S", "Settings"),
             ("Alt+↑↓←→", "Move window"),
+            ("Alt+Shift+↑↓", "Scroll chat up / down"),
+            ("Alt+PgUp/PgDn", "Opacity +/- 5%"),
         ]:
             r = tk.Frame(pnl, bg=cfg.BG2); r.pack(fill="x", padx=10, pady=1)
             tk.Label(r, text=key, bg=cfg.BG3, fg=cfg.PURPLE,
                      font=("Consolas", 8), padx=4, pady=1).pack(side="left")
             tk.Label(r, text=f"  {desc}", bg=cfg.BG2, fg=cfg.FG2,
                      font=cfg.FONT_TINY).pack(side="left")
-        tk.Frame(pnl, bg=cfg.BG2, height=8).pack()
+        tk.Frame(pnl, bg=cfg.BG2, height=6).pack()
+
+        tk.Frame(pnl, bg=cfg.BG3, height=1).pack(fill="x")
+        logout_row = tk.Frame(pnl, bg=cfg.BG2)
+        logout_row.pack(fill="x", padx=10, pady=6)
+        tk.Button(logout_row, text="Logout", command=self._logout,
+                  bg=cfg.RED, fg=cfg.FG, font=("Segoe UI", 8, "bold"),
+                  relief="flat", padx=6, pady=1).pack(side="left")
+        tk.Frame(pnl, bg=cfg.BG2, height=6).pack()
 
     # ------------------------------------------------------------------
     # Body — unified chat surface
@@ -640,7 +680,7 @@ class InterviewAssistant:
                 data = self.llm.chat(msg, self.session)
             ans = data["answer"]; qt = data["question_type"]; mem = data["memory_depth"]
             self.root.after(0, lambda: self._set_thinking(False))
-            self.root.after(0, lambda: self._append("ai", ans, f"AI [{qt}] mem:{mem}/5"))
+            self.root.after(0, lambda: self._append("ai", ans, f"AI [{qt}] mem:{mem}/{cfg.CHAT_MEMORY_LIMIT}"))
         except Exception as e:
             log.exception("Text send failed")
             self.root.after(0, lambda: self._set_thinking(False))
@@ -659,7 +699,7 @@ class InterviewAssistant:
             shots_n = data["screenshots_analyzed"]
             self.root.after(0, lambda: self._set_thinking(False))
             self.root.after(0, lambda: self._append(
-                "ai", ans, f"AI [{qt}] │ {shots_n} shot(s) │ mem:{mem}/5"))
+                "ai", ans, f"AI [{qt}] │ {shots_n} shot(s) │ mem:{mem}/{cfg.CHAT_MEMORY_LIMIT}"))
         except Exception as e:
             log.exception("Vision send failed")
             self.root.after(0, lambda: self._set_thinking(False))
@@ -775,7 +815,7 @@ class InterviewAssistant:
                     "👋 Hi! I'm your interview assistant.\n"
                     "Click-through is ON by default — clicks pass through to the app underneath.\n\n"
                     "Alt+P → Focus prompt   │  Alt+E → Send\n"
-                    "Alt+G → Attach screenshot   │  Alt+L → Clear chat\n"
+                    "Alt+G → Attach screenshot   │  Alt+C → Clear chat\n"
                     "Alt+Shift+A → Auto audio   │  Alt+Shift+D → Manual record\n"
                     "Alt+T → Toggle click-through   │  Alt+S → Settings\n\n"
                     "Tip: attach a screenshot to ask about what's on screen.",
@@ -929,10 +969,10 @@ class InterviewAssistant:
             with self.llm_lock:
                 if use_vision:
                     data = self.llm.analyze_screenshots(shots, transcript, self.session)
-                    suffix = f"AI [{data['question_type']}] │ {n_shots} shot(s) │ mem:{data['memory_depth']}/5"
+                    suffix = f"AI [{data['question_type']}] │ {n_shots} shot(s) │ mem:{data['memory_depth']}/{cfg.CHAT_MEMORY_LIMIT}"
                 else:
                     data = self.llm.chat(transcript, self.session)
-                    suffix = f"AI [{data['question_type']}] mem:{data['memory_depth']}/5"
+                    suffix = f"AI [{data['question_type']}] mem:{data['memory_depth']}/{cfg.CHAT_MEMORY_LIMIT}"
             ans = data["answer"]
             self.root.after(0, lambda: self._set_thinking(False))
             self.root.after(0, lambda: self._append("ai", ans, suffix))
@@ -1111,6 +1151,23 @@ class InterviewAssistant:
         x = self.root.winfo_x() + dx; y = self.root.winfo_y() + dy
         self.root.geometry(f"+{x}+{y}")
 
+    def _scroll_chat(self, units):
+        try:
+            self.chat_display.yview_scroll(units, "units")
+        except Exception:
+            log.exception("chat scroll failed")
+
+    def _adjust_opacity(self, delta):
+        a = round(max(0.1, min(1.0, self._alpha + delta)), 2)
+        if a == self._alpha:
+            return
+        self._alpha = a
+        try:
+            self.root.attributes("-alpha", a)
+        except Exception:
+            log.exception("opacity adjust failed")
+        self._set_status(f"● opacity {int(a*100)}%", cfg.ACCENT)
+
     def _register_hotkeys(self):
         self.hotkeys = HotkeyManager()
         atexit.register(self.hotkeys.stop)
@@ -1122,7 +1179,7 @@ class InterviewAssistant:
         hk("alt+e", self._send_message)
         hk("alt+t", self._toggle_click_through)
         hk("alt+p", self._focus_prompt)
-        hk("alt+l", self._clear_chat)
+        hk("alt+c", self._clear_chat)
         hk("alt+h", self._toggle_hide)
         hk("alt+q", self._quit)
         hk("alt+s", self._toggle_settings)
@@ -1132,6 +1189,10 @@ class InterviewAssistant:
         hk("alt+down", lambda: self._move_window(0, cfg.MOVE_STEP))
         hk("alt+left", lambda: self._move_window(-cfg.MOVE_STEP, 0))
         hk("alt+right", lambda: self._move_window(cfg.MOVE_STEP, 0))
+        hk("alt+shift+up", lambda: self._scroll_chat(-3))
+        hk("alt+shift+down", lambda: self._scroll_chat(3))
+        hk("alt+pageup", lambda: self._adjust_opacity(0.05))
+        hk("alt+pagedown", lambda: self._adjust_opacity(-0.05))
         self.hotkeys.start()
 
     def _drag_start(self, e):

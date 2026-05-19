@@ -42,6 +42,7 @@ WM_QUIT   = 0x0012
 # Virtual-key codes we care about
 VK_BACK   = 0x08; VK_TAB    = 0x09; VK_RETURN = 0x0D
 VK_ESCAPE = 0x1B; VK_SPACE  = 0x20
+VK_PRIOR  = 0x21; VK_NEXT   = 0x22  # PageUp, PageDown
 VK_LEFT   = 0x25; VK_UP     = 0x26; VK_RIGHT  = 0x27; VK_DOWN = 0x28
 VK_F1     = 0x70  # F1..F24 are sequential from here
 
@@ -50,6 +51,8 @@ _SPECIAL_KEYS = {
     "tab": VK_TAB, "enter": VK_RETURN, "return": VK_RETURN,
     "escape": VK_ESCAPE, "esc": VK_ESCAPE, "space": VK_SPACE,
     "backspace": VK_BACK,
+    "pageup": VK_PRIOR, "pgup": VK_PRIOR,
+    "pagedown": VK_NEXT, "pgdn": VK_NEXT,
 }
 
 # Explicit ctypes signatures so 32/64-bit doesn't bite us
