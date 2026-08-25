@@ -1,15 +1,22 @@
 """LLM API service + Session manager with modular providers.
 
 Providers:
-- Groq (Llama Scout) — text + vision, always available, also powers Whisper STT.
+- Groq (Qwen 3.6 27B, GPT-OSS 120B/20B, Compound) — always available, also
+  powers Whisper STT. Qwen is the only Groq model that accepts images, so it
+  serves vision for the text-only entries too.
 - OpenAI (GPT-5 / GPT-5 mini) — text + vision via the chat.completions API.
-- Anthropic (Claude Sonnet 4.6 / Opus 4.7) — text + vision via Messages API.
+- Anthropic (Opus 5, Sonnet 5, Opus 4.7, Sonnet 4.6, Haiku 4.5) — text +
+  vision via the Messages API.
+
+Request parameters differ per model within a provider, not just between
+providers — see _GROQ_MODEL_PARAMS and _CLAUDE_MODEL_PARAMS. Sending the wrong
+one is a 400, not a silent no-op.
 
 API keys are persisted with DPAPI encryption (see `secure_store`). The file
 on disk in %APPDATA%\\InterviewAssistant\\api_keys.dat is opaque bytes; only
 the same Windows user can decrypt it.
 """
-import os, sys, uuid, io, base64, logging
+import os, re, sys, uuid, io, base64, logging
 import config as cfg
 from secure_store import load_secret_json, save_secret_json
 
@@ -198,6 +205,46 @@ def _memory_breadcrumb(images_b64, prompt_text):
 # ---------------------------------------------------------------------------
 # Groq
 # ---------------------------------------------------------------------------
+# Qwen is a reasoning model: without suppression its content starts with a
+# "<think>...</think>" block. We disable thinking at the API level
+# (reasoning_effort="none" + reasoning_format="hidden"), and strip any block
+# that still leaks through before the answer reaches the UI or chat memory.
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_thinking(text):
+    return _THINK_RE.sub("", text or "").strip()
+
+
+# Groq's reasoning knobs are per-model, and sending the wrong value is a hard
+# 400 rather than a silent no-op. Verified against the live API:
+#
+#   qwen/qwen3.6-27b      reasoning_effort must be "none" or "default"
+#   openai/gpt-oss-*      reasoning_effort must be "low", "medium" or "high"
+#   groq/compound*        reasoning_effort is rejected entirely
+#
+# So these cannot be hardcoded on the request — a single dropdown entry can
+# route text at gpt-oss and vision at Qwen, which need different values.
+#
+# "none" on Qwen is doing real work: with reasoning left on, thinking eats the
+# whole MAX_TOKENS budget and the answer comes back empty. gpt-oss keeps its
+# reasoning in a separate `reasoning` field rather than in the content, so it
+# only needs "hidden" to stop that field being billed back to us; "low" keeps
+# it quick, which is what a live interview needs.
+_GROQ_MODEL_PARAMS = {
+    "qwen/qwen3.6-27b":    {"reasoning_effort": "none", "reasoning_format": "hidden"},
+    "openai/gpt-oss-120b": {"reasoning_effort": "low",  "reasoning_format": "hidden"},
+    "openai/gpt-oss-20b":  {"reasoning_effort": "low",  "reasoning_format": "hidden"},
+    # groq/compound and groq/compound-mini take neither parameter.
+}
+
+
+def _groq_params(model):
+    """Extra request kwargs for a Groq model. Unknown models get none, which
+    is the shape every Groq chat model accepts."""
+    return _GROQ_MODEL_PARAMS.get(model, {})
+
+
 class GroqProvider(LLMProvider):
     def __init__(self, text_model, vision_model):
         super().__init__(text_model, vision_model)
@@ -216,8 +263,9 @@ class GroqProvider(LLMProvider):
         messages.append({"role": "user", "content": message})
         response = self.client.chat.completions.create(
             model=self.text_model, messages=messages,
-            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
-        answer = response.choices[0].message.content
+            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE,
+            **_groq_params(self.text_model))
+        answer = _strip_thinking(response.choices[0].message.content)
         session.push_memory("user", message)
         session.push_memory("assistant", answer)
         session.message_count += 1
@@ -248,8 +296,9 @@ class GroqProvider(LLMProvider):
                     {"role": "user", "content": content}]
         response = self.client.chat.completions.create(
             model=self.vision_model, messages=messages,
-            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE)
-        answer = response.choices[0].message.content
+            max_tokens=cfg.MAX_TOKENS, temperature=cfg.TEMPERATURE,
+            **_groq_params(self.vision_model))
+        answer = _strip_thinking(response.choices[0].message.content)
         session.push_memory("user", _memory_breadcrumb(images_b64, prompt_text))
         session.push_memory("assistant", answer)
         session.message_count += 1
@@ -315,8 +364,47 @@ class OpenAIProvider(LLMProvider):
 
 
 # ---------------------------------------------------------------------------
-# Anthropic (Claude Sonnet 4.6 / Opus 4.7)
+# Anthropic
 # ---------------------------------------------------------------------------
+# Two model-dependent rules make a single hardcoded request shape impossible:
+#
+# 1. `temperature` (and top_p/top_k) was REMOVED on the current flagships —
+#    Opus 5, Sonnet 5, Opus 4.8 and Opus 4.7 return a 400 if it is sent. Only
+#    Sonnet 4.6, Opus 4.6 and Haiku 4.5 still accept it.
+# 2. Opus 5 and Sonnet 5 run adaptive thinking by DEFAULT. Thinking tokens are
+#    drawn from max_tokens, so at MAX_TOKENS=1500 the model can spend the whole
+#    budget reasoning and return a response with no text block at all. Opus 4.7
+#    and the 4.x models below it do not think unless asked, so they only need
+#    the temperature fix.
+#
+# Anything not listed gets {} — no temperature, no thinking override — which is
+# the shape most likely to be accepted by a model added here later.
+_CLAUDE_MODEL_PARAMS = {
+    "claude-opus-5":     {"thinking": {"type": "disabled"}},
+    "claude-sonnet-5":   {"thinking": {"type": "disabled"}},
+    "claude-opus-4-7":   {},
+    "claude-sonnet-4-6": {"temperature": cfg.TEMPERATURE},
+    "claude-haiku-4-5":  {"temperature": cfg.TEMPERATURE},
+}
+
+# Anthropic's guidance for running with thinking turned off: the model can
+# occasionally leak an internal tag into the visible answer. Naming the tags or
+# adding a "do not reason" rule makes it worse, so this is the whole mitigation.
+_NO_TAGS_RULE = "\n- Do not include internal or system XML tags in your response."
+
+
+def _claude_params(model):
+    return _CLAUDE_MODEL_PARAMS.get(model, {})
+
+
+def _claude_system_prompt(model, session):
+    prompt = session.build_system_prompt()
+    thinking = _claude_params(model).get("thinking") or {}
+    if thinking.get("type") == "disabled":
+        prompt += _NO_TAGS_RULE
+    return prompt
+
+
 class ClaudeProvider(LLMProvider):
     def __init__(self, text_model, vision_model):
         super().__init__(text_model, vision_model)
@@ -350,10 +438,10 @@ class ClaudeProvider(LLMProvider):
         messages.append({"role": "user", "content": message})
         response = self.client.messages.create(
             model=self.text_model,
-            system=session.build_system_prompt(),
+            system=_claude_system_prompt(self.text_model, session),
             messages=messages,
             max_tokens=cfg.MAX_TOKENS,
-            temperature=cfg.TEMPERATURE,
+            **_claude_params(self.text_model),
         )
         answer = "".join(
             block.text for block in response.content if getattr(block, "type", None) == "text"
@@ -384,10 +472,10 @@ class ClaudeProvider(LLMProvider):
 
         response = self.client.messages.create(
             model=self.vision_model,
-            system=session.build_system_prompt(),
+            system=_claude_system_prompt(self.vision_model, session),
             messages=messages,
             max_tokens=cfg.MAX_TOKENS,
-            temperature=cfg.TEMPERATURE,
+            **_claude_params(self.vision_model),
         )
         answer = "".join(
             block.text for block in response.content if getattr(block, "type", None) == "text"

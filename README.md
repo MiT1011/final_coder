@@ -118,13 +118,30 @@ The executable will be created at `dist/InterviewAssistant.exe`.
 
 ## 🔌 Supported LLM Providers
 
-| Provider | Model                    | Status        |
-|----------|--------------------------|---------------|
-| Groq     | Llama 4 Scout 17B        | ✅ Active     |
-| OpenAI   | GPT-4o                   | 🔜 Coming Soon |
-| Claude   | Claude 3.5 Sonnet        | 🔜 Coming Soon |
+All three providers are implemented. Entries appear in the title-bar dropdown
+only once the matching API key is saved in ⚙ Settings.
 
-To add a new provider in the future, implement the `LLMProvider` base class in `llm_service.py`.
+| Provider | Model              | Images | Notes                                          |
+|----------|--------------------|--------|------------------------------------------------|
+| Groq     | Qwen 3.6 27B       | ✅     | Default. The only Groq model that accepts images |
+| Groq     | GPT-OSS 120B       | ↪      | Text only — screenshots route to Qwen           |
+| Groq     | GPT-OSS 20B        | ↪      | Text only — smaller/faster than 120B            |
+| Groq     | Compound           | ↪      | Agentic: server-side web search + code execution |
+| OpenAI   | GPT-5 / GPT-5 mini | ✅     |                                                  |
+| Claude   | Opus 5             | ✅     | Most capable                                     |
+| Claude   | Sonnet 5           | ✅     | Cheaper than Opus 5                              |
+| Claude   | Opus 4.7           | ✅     |                                                  |
+| Claude   | Sonnet 4.6         | ✅     |                                                  |
+| Claude   | Haiku 4.5          | ✅     | Cheapest and fastest Claude                      |
+
+Whisper STT always runs on Groq (`whisper-large-v3-turbo`) regardless of which
+chat model is selected, so a Groq key is required for the audio feature.
+
+To add a new provider, implement the `LLMProvider` base class in
+`llm_service.py`. To add a *model* to an existing provider, add an entry to
+`AVAILABLE_MODELS` in `config.py` — and check whether it also needs a row in
+that provider's per-model parameter table in `llm_service.py`, since reasoning
+and sampling parameters vary between models from the same vendor.
 
 ---
 

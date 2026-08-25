@@ -1,26 +1,49 @@
 """All configurable settings."""
 
+# Model catalogue. `text`/`vision` hold the provider-side model IDs; `requires`
+# names the API key that must be present for the entry to show up in the picker.
+#
+# Per-model request parameters (reasoning knobs, whether `temperature` is even
+# accepted) are NOT here — they live in llm_service.py next to the provider that
+# sends them, because a single entry can point `text` and `vision` at two models
+# that take different parameters.
 AVAILABLE_MODELS = {
-    # Groq is the always-available default — bundled free tier (Llama Scout +
-    # Whisper). Its key is collected as mandatory after login.
-    "Groq Llama Scout": {
+    # --- Groq: always-available free tier. Its key is collected as mandatory
+    # after login and also powers Whisper STT. -------------------------------
+    #
+    # These IDs were verified against Groq's live model catalogue. Groq retires
+    # models without notice — the Llama Scout and Llama 3.3 70B entries this
+    # file used to carry no longer exist on the account and would 404.
+    #
+    # Qwen 3.6 27B is the ONLY vision-capable model Groq currently serves, so
+    # every text-only Groq entry below falls back to it for screenshot
+    # analysis. It is a reasoning model: GroqProvider suppresses the <think>
+    # block so it never reaches the UI.
+    "Groq Qwen 3.6 27B": {
         "provider": "groq",
-        "text": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "text": "qwen/qwen3.6-27b",
+        "vision": "qwen/qwen3.6-27b",
         "requires": "groq",
     },
     "Groq GPT-OSS 120B": {
         "provider": "groq",
         "text": "openai/gpt-oss-120b",
-        # Text-only on Groq — fall back to Scout for screenshot/vision calls.
-        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "vision": "qwen/qwen3.6-27b",   # text-only model — Qwen handles images
         "requires": "groq",
     },
-    "Groq Llama 3.3 70B": {
+    "Groq GPT-OSS 20B": {
         "provider": "groq",
-        "text": "llama-3.3-70b-versatile",
-        # Text-only on Groq — fall back to Scout for screenshot/vision calls.
-        "vision": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "text": "openai/gpt-oss-20b",
+        "vision": "qwen/qwen3.6-27b",
+        "requires": "groq",
+    },
+    # Compound is an agentic system rather than a bare model: it can run web
+    # search and code execution on Groq's side, which is useful for factual
+    # lookups mid-interview but costs extra latency on every turn.
+    "Groq Compound": {
+        "provider": "groq",
+        "text": "groq/compound",
+        "vision": "qwen/qwen3.6-27b",
         "requires": "groq",
     },
     "GPT-5": {
@@ -35,10 +58,20 @@ AVAILABLE_MODELS = {
         "vision": "gpt-5-mini",
         "requires": "openai",
     },
-    "Claude Sonnet 4.6": {
+    # --- Anthropic. Every model below is vision-capable, so text and vision
+    # point at the same ID. See _CLAUDE_MODEL_PARAMS in llm_service.py: the
+    # current flagships reject `temperature` outright and default to adaptive
+    # thinking, both of which need per-model handling. --------------------
+    "Claude Opus 5": {
         "provider": "claude",
-        "text": "claude-sonnet-4-6",
-        "vision": "claude-sonnet-4-6",
+        "text": "claude-opus-5",
+        "vision": "claude-opus-5",
+        "requires": "claude",
+    },
+    "Claude Sonnet 5": {
+        "provider": "claude",
+        "text": "claude-sonnet-5",
+        "vision": "claude-sonnet-5",
         "requires": "claude",
     },
     "Claude Opus 4.7": {
@@ -47,8 +80,22 @@ AVAILABLE_MODELS = {
         "vision": "claude-opus-4-7",
         "requires": "claude",
     },
+    "Claude Sonnet 4.6": {
+        "provider": "claude",
+        "text": "claude-sonnet-4-6",
+        "vision": "claude-sonnet-4-6",
+        "requires": "claude",
+    },
+    # Cheapest and fastest Claude — 200K context (the others are 1M), which is
+    # far more than CHAT_MEMORY_LIMIT will ever produce.
+    "Claude Haiku 4.5": {
+        "provider": "claude",
+        "text": "claude-haiku-4-5",
+        "vision": "claude-haiku-4-5",
+        "requires": "claude",
+    },
 }
-DEFAULT_MODEL = "Groq Llama Scout"
+DEFAULT_MODEL = "Groq Qwen 3.6 27B"
 MAX_TOKENS   = 1500
 TEMPERATURE  = 0.3
 CHAT_MEMORY_LIMIT = 15
